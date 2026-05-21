@@ -1,0 +1,12 @@
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "tool": "edit",
+      "description": "Block code writes when API contracts are missing",
+      "type": "command",
+      "command": "node -e \"\nconst fs = require('fs');\nconst path = require('path');\n\nconst contractPath = path.join(process.cwd(), 'docs', 'architecture', 'API-CONTRACTS.yaml');\n\nif (!fs.existsSync(contractPath)) {\n  console.error('HOOK BLOCKED: docs/architecture/API-CONTRACTS.yaml does not exist.');\n  console.error('API contracts must be defined by solution-architect before backend or frontend implementation begins.');\n  console.error('Action: Return to solution-architect to produce API-CONTRACTS.yaml.');\n  process.exit(2);\n}\n\nconst content = fs.readFileSync(contractPath, 'utf8');\n\nif (!content.includes('paths:')) {\n  console.error('HOOK BLOCKED: API-CONTRACTS.yaml has no paths defined.');\n  console.error('At least one API endpoint must be documented before implementation.');\n  console.error('Action: Return to solution-architect to define API paths.');\n  process.exit(2);\n}\n\nconst pathMatches = content.match(/^  \\//gm);\nif (!pathMatches || pathMatches.length === 0) {\n  console.error('HOOK BLOCKED: API-CONTRACTS.yaml paths section is empty.');\n  console.error('Define at least one endpoint path before writing implementation code.');\n  process.exit(2);\n}\n\nprocess.exit(0);\n\"",
+      "applyTo": ["src/**", "app/**"]
+    }
+  ]
+}

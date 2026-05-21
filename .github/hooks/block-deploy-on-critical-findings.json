@@ -1,0 +1,12 @@
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "tool": "edit",
+      "description": "Block infrastructure or production deploy writes when CRITICAL security findings are unresolved",
+      "type": "command",
+      "command": "node -e \"\nconst fs = require('fs');\nconst path = require('path');\n\nconst reviewPath = path.join(process.cwd(), 'docs', 'security', 'SECURITY-REVIEW.md');\n\nif (!fs.existsSync(reviewPath)) {\n  console.error('HOOK BLOCKED: docs/security/SECURITY-REVIEW.md does not exist.');\n  console.error('A security review is required before deploying to any environment.');\n  console.error('Action: Invoke security-engineer to produce SECURITY-REVIEW.md.');\n  process.exit(2);\n}\n\nconst content = fs.readFileSync(reviewPath, 'utf8');\n\n// Check for unresolved CRITICAL findings\n// Pattern: a CRITICAL finding heading followed by Status: Unresolved\nconst lines = content.split('\\n');\nlet inCriticalFinding = false;\nlet unresolvedCriticals = [];\nlet currentFindingTitle = '';\n\nfor (const line of lines) {\n  if (line.match(/###.*CRITICAL.*FINDING/i) || line.match(/###.*FINDING.*CRITICAL/i)) {\n    inCriticalFinding = true;\n    currentFindingTitle = line.replace(/^###\\s*/, '').trim();\n  } else if (line.match(/^###/)) {\n    inCriticalFinding = false;\n    currentFindingTitle = '';\n  }\n\n  if (inCriticalFinding && line.match(/Status:\\s*Unresolved/i)) {\n    unresolvedCriticals.push(currentFindingTitle);\n  }\n}\n\nif (unresolvedCriticals.length > 0) {\n  console.error('HOOK BLOCKED: Unresolved CRITICAL security findings detected.');\n  console.error('The following CRITICAL findings must be resolved before deployment:');\n  unresolvedCriticals.forEach(function(f) { console.error('  - ' + f); });\n  console.error('Action: Return to security-engineer to remediate findings.');\n  console.error('Note: CRITICAL findings cannot be waived with an ADR — remediation is required.');\n  process.exit(2);\n}\n\nprocess.exit(0);\n\"",
+      "applyTo": ["infra/**", ".github/workflows/**"]
+    }
+  ]
+}

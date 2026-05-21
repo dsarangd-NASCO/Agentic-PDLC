@@ -1,0 +1,12 @@
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "tool": "execute",
+      "description": "Warn when a git branch is older than 2 working days (TBD policy §1.2)",
+      "type": "command",
+      "command": "node -e \"\nconst { execSync } = require('child_process');\n\ntry {\n  const branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8' }).trim();\n\n  if (branch === 'main' || branch === 'HEAD') {\n    process.exit(0);\n  }\n\n  const branchCreatedOutput = execSync(\n    'git log --reverse --format=%ci ' + branch + ' --not main',\n    { encoding: 'utf8' }\n  ).trim();\n\n  if (!branchCreatedOutput) {\n    process.exit(0);\n  }\n\n  const firstCommitDate = new Date(branchCreatedOutput.split('\\n')[0]);\n  const now = new Date();\n\n  const msPerDay = 1000 * 60 * 60 * 24;\n  const daysDiff = (now - firstCommitDate) / msPerDay;\n\n  // Approximate working days (weekdays only)\n  let workingDays = 0;\n  const cursor = new Date(firstCommitDate);\n  while (cursor <= now) {\n    const day = cursor.getDay();\n    if (day !== 0 && day !== 6) workingDays++;\n    cursor.setDate(cursor.getDate() + 1);\n  }\n\n  if (workingDays > 2) {\n    console.warn('TBD POLICY WARNING: Branch \\\"' + branch + '\\\" is ' + workingDays + ' working days old.');\n    console.warn('Engineering policy §1.2 requires branches to be merged within 2 working days.');\n    console.warn('Action: Either merge now, split the task, or put incomplete work behind a feature flag.');\n    // Warning only — do not block (exit 0)\n  }\n} catch (e) {\n  // If git commands fail (not a git repo, etc.), do not block\n}\n\nprocess.exit(0);\n\"",
+      "applyTo": ["**"]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "tool": "edit",
+      "description": "Block code writes when SPEC.md has no acceptance criteria",
+      "type": "command",
+      "command": "node -e \"\nconst fs = require('fs');\nconst path = require('path');\n\nconst specPath = path.join(process.cwd(), 'docs', 'spec', 'SPEC.md');\n\nif (!fs.existsSync(specPath)) {\n  console.error('HOOK BLOCKED: docs/spec/SPEC.md does not exist.');\n  console.error('Product specification is required before writing code.');\n  console.error('Action: Return to product-lead to produce SPEC.md.');\n  process.exit(2);\n}\n\nconst content = fs.readFileSync(specPath, 'utf8');\n\nif (!content.includes('Acceptance Criteria')) {\n  console.error('HOOK BLOCKED: SPEC.md has no Acceptance Criteria section.');\n  console.error('Every feature must have testable acceptance criteria before implementation.');\n  console.error('Action: Return to product-lead to add acceptance criteria to SPEC.md.');\n  process.exit(2);\n}\n\nconst acMatches = content.match(/- \\[ \\]/g);\nif (!acMatches || acMatches.length === 0) {\n  console.error('HOOK BLOCKED: SPEC.md Acceptance Criteria section has no criteria items.');\n  console.error('Add at least one testable criterion before writing code.');\n  console.error('Action: Return to product-lead to populate acceptance criteria.');\n  process.exit(2);\n}\n\nprocess.exit(0);\n\"",
+      "applyTo": ["src/**", "tests/**", "app/**"]
+    }
+  ]
+}
