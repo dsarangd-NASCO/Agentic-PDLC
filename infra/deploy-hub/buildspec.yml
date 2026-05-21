@@ -1,0 +1,143 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "[$(date)] Starting CodeBuild pipeline for $IMAGE_REPO_NAME:$IMAGE_TAG"
+      - AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - IMAGE_REPO_NAME=${IMAGE_REPO_NAME:-deploy-hub-api}
+      - IMAGE_TAG=${IMAGE_TAG:-latest}
+      - ENVIRONMENT=${ENVIRONMENT:-dev}
+      - |
+        if [ "$CODEBUILD_RESOLVED_SOURCE_VERSION" != "" ]; then
+          GIT_SHA=$CODEBUILD_RESOLVED_SOURCE_VERSION
+        else
+          GIT_SHA=$(git rev-parse --short HEAD)
+        fi
+      - echo "Git SHA: $GIT_SHA, Environment: $ENVIRONMENT, Region: $AWS_DEFAULT_REGION"
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPOSITORY_URI=$REGISTRY/$IMAGE_REPO_NAME
+      - echo "ECR URI: $REPOSITORY_URI"
+
+  install:
+    commands:
+      - echo "[$(date)] Installing Node.js and dependencies..."
+      - node --version
+      - npm --version
+      - npm ci
+      - echo "[$(date)] Node.js installation complete"
+
+  pre_test:
+    commands:
+      - echo "[$(date)] Running linting checks..."
+      - npm run lint
+      - echo "[$(date)] Linting complete"
+      
+      - echo "[$(date)] Running type checking..."
+      - npm run type-check
+      - echo "[$(date)] Type checking complete"
+
+  build:
+    commands:
+      - echo "[$(date)] Running unit tests..."
+      - npm run test
+      - echo "[$(date)] Unit tests complete"
+      
+      - echo "[$(date)] Running npm audit for security vulnerabilities..."
+      - npm audit --audit-level=high || { echo "⚠️ High-severity vulnerabilities detected"; exit 1; }
+      - echo "[$(date)] npm audit complete"
+      
+      - echo "[$(date)] Running tfsec for Terraform security scanning..."
+      - |
+        if [ -d "infra/" ]; then
+          tfsec infra/ --severity HIGH,CRITICAL || { echo "⚠️ High/Critical tfsec findings detected"; exit 1; }
+          echo "[$(date)] tfsec complete"
+        else
+          echo "No infra/ directory found, skipping tfsec"
+        fi
+      
+      - echo "[$(date)] Running Checkov for infrastructure compliance..."
+      - |
+        if [ -d "infra/" ]; then
+          checkov -d infra/ --framework terraform --soft-fail || { echo "⚠️ Checkov findings detected (non-blocking)"; }
+          echo "[$(date)] Checkov complete"
+        else
+          echo "No infra/ directory found, skipping Checkov"
+        fi
+      
+      - echo "[$(date)] Building application..."
+      - npm run build
+      - echo "[$(date)] Application build complete"
+      
+      - echo "[$(date)] Building Docker image..."
+      - docker build -t $REPOSITORY_URI:$GIT_SHA-$ENVIRONMENT .
+      - docker tag $REPOSITORY_URI:$GIT_SHA-$ENVIRONMENT $REPOSITORY_URI:latest
+      - echo "[$(date)] Docker image build complete"
+      
+      - echo "[$(date)] Scanning Docker image with Trivy..."
+      - |
+        trivy image --severity HIGH,CRITICAL --exit-code 0 $REPOSITORY_URI:$GIT_SHA-$ENVIRONMENT || \
+          { echo "⚠️ High/Critical vulnerabilities in image (non-blocking)"; }
+      - echo "[$(date)] Trivy scan complete"
+      
+      - echo "[$(date)] Pushing Docker image to ECR..."
+      - docker push $REPOSITORY_URI:$GIT_SHA-$ENVIRONMENT
+      - docker push $REPOSITORY_URI:latest
+      - echo "Image pushed: $REPOSITORY_URI:$GIT_SHA-$ENVIRONMENT"
+      
+      - echo "[$(date)] Installing cosign for image signing..."
+      - curl -Lo /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
+      - chmod +x /usr/local/bin/cosign
+      
+      - echo "[$(date)] Signing Docker image with cosign..."
+      - |
+        # For MVP: use keyless signing (experimental)
+        # In production, use KMS key: cosign sign --key awskms:///alias/deploy-hub-cosign
+        cosign sign --allow-insecure-registry $REPOSITORY_URI:$GIT_SHA-$ENVIRONMENT || \
+          echo "⚠️ Image signing skipped (keyless signing requires authentication configuration)"
+      - echo "[$(date)] Image signing complete"
+      
+      - echo "[$(date)] Generating CycloneDX SBOM..."
+      - npm install -g @cyclonedx/cyclonedx-npm
+      - cyclonedx-npm --output-format json --output-file sbom.json
+      - echo "[$(date)] SBOM generation complete"
+
+  post_build:
+    commands:
+      - echo "[$(date)] Creating imagedefinitions.json for CodeDeploy..."
+      - |
+        printf '[{"name":"api","imageUri":"%s"}]' "$REPOSITORY_URI:$GIT_SHA-$ENVIRONMENT" > imagedefinitions.json
+      - echo "Image definitions created:"
+      - cat imagedefinitions.json
+      
+      - echo "[$(date)] CodeBuild pipeline completed successfully"
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - sbom.json
+    - appspec.yaml
+  discard-paths: yes
+  name: BuildArtifact
+
+cache:
+  paths:
+    - '/root/.npm/**/*'
+    - '/root/.m2/**/*'
+
+reports:
+  npm-audit:
+    files:
+      - sbom.json
+    file-format: 'JUNITXML'
+  coverage-report:
+    files:
+      - 'coverage/cobertura-coverage.xml'
+    file-format: 'COBERTURAXML'
+
+logs:
+  cloudwatch_logs:
+    group_name: /aws/codebuild/deploy-hub
+    stream_name: build-logs

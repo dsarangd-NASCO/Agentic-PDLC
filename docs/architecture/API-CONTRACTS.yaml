@@ -1,0 +1,1014 @@
+openapi: 3.0.0
+info:
+  title: Deploy-Hub API
+  version: 1.0.0
+  description: |
+    Deployment orchestration platform for SaaS products. Coordinates automated deployment pipelines with health validation and rollback capability.
+    
+    **API Stability:** This is the contract between frontend/CI systems and deploy-hub. Breaking changes require a major version bump and migration period.
+    
+    **Rate Limiting:** 100 requests/minute per service (enforced via API gateway).
+    
+    **Authentication:** All endpoints require a Bearer token (OpenID Connect, AWS IAM, or JWT issued by upstream auth provider).
+    
+  contact:
+    name: Platform Engineering Team
+    email: platform-eng@nasco.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://deploy-hub.prod.nasco.com
+    description: Production
+  - url: https://deploy-hub.stage.nasco.com
+    description: Staging
+  - url: http://localhost:3000
+    description: Local development
+
+components:
+  securitySchemes:
+    BearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Bearer token issued by upstream OIDC provider or AWS IAM.
+        Must include claims: `sub` (user ID), `aud` (service identifier), `exp` (expiration).
+
+  schemas:
+    # ============================================================================
+    # Request/Response Schemas
+    # ============================================================================
+    
+    DeploymentRequest:
+      type: object
+      required:
+        - service_id
+        - target_env
+        - artifact_url
+        - health_check_url
+      properties:
+        service_id:
+          type: string
+          pattern: '^[a-z][a-z0-9\-]{0,19}$'
+          minLength: 1
+          maxLength: 20
+          description: Service identifier (e.g., "payments-api", "auth-service"). Must match service registered in ServiceConfig.
+          example: "payments-api"
+        
+        target_env:
+          type: string
+          enum:
+            - dev
+            - stage
+            - prod
+          description: Target deployment environment.
+          example: "prod"
+        
+        artifact_url:
+          type: string
+          format: uri
+          minLength: 10
+          maxLength: 256
+          description: |
+            Artifact reference (container image or WAR file URL).
+            Formats:
+            - Container image: `ecr://123456789012.dkr.ecr.us-east-1.amazonaws.com/payments-api:v2.4.1-a3f1c2b`
+            - WAR file: `s3://nasco-artifacts/payments-api/v2.4.1/payments-api.war`
+            
+            Must be content-addressed by SHA or immutable tag. Mutable tags (e.g., `:latest`) are rejected.
+          example: "ecr://123456789012.dkr.ecr.us-east-1.amazonaws.com/payments-api:v2.4.1-a3f1c2b"
+        
+        health_check_url:
+          type: string
+          format: uri
+          minLength: 10
+          maxLength: 256
+          description: |
+            Post-deployment health check endpoint.
+            Must return HTTP 200 OK with JSON body `{"status": "healthy"}` or plain text.
+            Protocol must be HTTPS (HTTP allowed only for localhost/dev).
+          example: "https://payments-prod.nasco.com/health"
+        
+        health_check_timeout_seconds:
+          type: integer
+          minimum: 10
+          maximum: 120
+          default: 30
+          description: Timeout for each health check attempt (seconds). Total health check phase: timeout × 2 attempts.
+          example: 30
+        
+        approval_required:
+          type: boolean
+          default: false
+          description: |
+            Deprecated (for forward compatibility). Approval workflows handled upstream by RBAC layer.
+            Deploy-hub does not enforce approvals; upstream system controls who can submit deployment requests.
+        
+        idempotency_key:
+          type: string
+          format: uuid
+          description: |
+            Optional idempotency key. If provided and a deployment with this key already exists,
+            returns the existing deployment instead of creating duplicate.
+            Allows safe retries in case of network failures.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+    
+    DeploymentResponse:
+      type: object
+      required:
+        - deployment_id
+        - service_id
+        - target_env
+        - status
+        - artifact_url
+        - created_at
+      properties:
+        deployment_id:
+          type: string
+          format: uuid
+          description: Unique deployment identifier.
+          example: "d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+        
+        service_id:
+          type: string
+          description: Service identifier.
+          example: "payments-api"
+        
+        target_env:
+          type: string
+          enum:
+            - dev
+            - stage
+            - prod
+          description: Target environment.
+          example: "prod"
+        
+        status:
+          type: string
+          enum:
+            - queued
+            - preparing
+            - validating
+            - deploying
+            - verifying
+            - complete
+            - failed
+            - rolling_back
+            - rolled_back
+          description: Current deployment status (finite state machine).
+          example: "validating"
+        
+        artifact_url:
+          type: string
+          description: Artifact reference.
+          example: "ecr://123456789012.dkr.ecr.us-east-1.amazonaws.com/payments-api:v2.4.1-a3f1c2b"
+        
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: |
+            Completion percentage (0–100). Rough mapping:
+            - queued: 0%
+            - preparing: 20%
+            - validating: 40%
+            - deploying: 60%
+            - verifying: 80%
+            - complete: 100%
+            - failed: stage-dependent (may be 0–100%)
+        
+        current_stage:
+          type: string
+          enum:
+            - prepare
+            - validate
+            - deploy
+            - verify
+            - finalize
+          nullable: true
+          description: Currently executing stage (null if queued or complete).
+          example: "validate"
+        
+        created_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp when deployment was created.
+          example: "2026-05-21T14:30:00Z"
+        
+        updated_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of last status update.
+          example: "2026-05-21T14:32:15Z"
+        
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO 8601 timestamp when deployment reached terminal state (complete/failed/rolled_back).
+          example: "2026-05-21T15:17:45Z"
+        
+        error_message:
+          type: string
+          maxLength: 512
+          nullable: true
+          description: Human-readable error message if deployment failed.
+          example: "Health check failed: service returned HTTP 503"
+        
+        previous_deployment_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Deployment ID of the previous stable version (used for rollback).
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+
+    DeploymentStatusResponse:
+      type: object
+      required:
+        - deployment_id
+        - status
+        - current_stage
+        - progress
+      properties:
+        deployment_id:
+          type: string
+          format: uuid
+          example: "d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+        
+        status:
+          type: string
+          enum:
+            - queued
+            - preparing
+            - validating
+            - deploying
+            - verifying
+            - complete
+            - failed
+            - rolling_back
+            - rolled_back
+          example: "validating"
+        
+        current_stage:
+          type: string
+          nullable: true
+          example: "validate"
+        
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 40
+        
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-05-21T14:32:15Z"
+
+    DeploymentStage:
+      type: object
+      required:
+        - stage_name
+        - status
+        - started_at
+      properties:
+        stage_name:
+          type: string
+          enum:
+            - prepare
+            - validate
+            - deploy
+            - verify
+            - finalize
+          description: Stage identifier.
+          example: "validate"
+        
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - complete
+            - failed
+          description: Stage execution status.
+          example: "running"
+        
+        started_at:
+          type: string
+          format: date-time
+          description: When stage execution started.
+          example: "2026-05-21T14:31:30Z"
+        
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When stage execution completed (null if still running).
+          example: "2026-05-21T14:32:15Z"
+        
+        duration_ms:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Stage duration in milliseconds (null if running).
+          example: 45000
+        
+        error_message:
+          type: string
+          maxLength: 512
+          nullable: true
+          description: Error message if stage failed.
+          example: null
+
+    DeploymentStagesResponse:
+      type: object
+      required:
+        - deployment_id
+        - stages
+      properties:
+        deployment_id:
+          type: string
+          format: uuid
+          example: "d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+        
+        stages:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeploymentStage'
+          description: List of deployment stages in execution order.
+
+    RollbackRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 256
+          description: Human-readable reason for rollback (optional, for audit trail).
+          example: "Health check failures detected in verifying stage"
+
+    RollbackResponse:
+      type: object
+      required:
+        - rollback_id
+        - deployment_id
+        - previous_deployment_id
+        - status
+      properties:
+        rollback_id:
+          type: string
+          format: uuid
+          description: Unique rollback operation identifier.
+          example: "r4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+        
+        deployment_id:
+          type: string
+          format: uuid
+          description: ID of deployment being rolled back.
+          example: "d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+        
+        previous_deployment_id:
+          type: string
+          format: uuid
+          description: ID of deployment to restore.
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+        
+        status:
+          type: string
+          enum:
+            - initiated
+            - in_progress
+            - complete
+            - failed
+          description: Rollback operation status.
+          example: "initiated"
+        
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-21T15:20:00Z"
+
+    HealthCheckResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - healthy
+            - degraded
+            - unhealthy
+          description: Overall health status of deploy-hub.
+          example: "healthy"
+        
+        checks:
+          type: object
+          properties:
+            database:
+              type: string
+              enum:
+                - ok
+                - error
+              description: PostgreSQL connectivity.
+              example: "ok"
+            
+            codebuild:
+              type: string
+              enum:
+                - ok
+                - error
+              description: AWS CodeBuild service availability.
+              example: "ok"
+            
+            codedeploy:
+              type: string
+              enum:
+                - ok
+                - error
+              description: AWS CodeDeploy service availability.
+              example: "ok"
+        
+        uptime_seconds:
+          type: integer
+          minimum: 0
+          description: Seconds since last restart.
+          example: 864000
+        
+        timestamp:
+          type: string
+          format: date-time
+          description: Timestamp of health check.
+          example: "2026-05-21T15:30:00Z"
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+        - request_id
+      properties:
+        error:
+          type: string
+          description: Error code (e.g., 'DEPLOYMENT_NOT_FOUND', 'INVALID_ARTIFACT_URL').
+          example: "DEPLOYMENT_NOT_FOUND"
+        
+        message:
+          type: string
+          maxLength: 512
+          description: Human-readable error message.
+          example: "Deployment d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b not found"
+        
+        request_id:
+          type: string
+          description: Unique request ID for debugging and support tickets.
+          example: "req-550e8400-e29b-41d4-a716-446655440000"
+        
+        timestamp:
+          type: string
+          format: date-time
+          description: Timestamp of error.
+          example: "2026-05-21T15:30:00Z"
+        
+        details:
+          type: object
+          nullable: true
+          description: Additional error context (varies by error type).
+          example: null
+
+security:
+  - BearerToken: []
+
+paths:
+  # ============================================================================
+  # Deployment Submission
+  # ============================================================================
+  
+  /deployments:
+    post:
+      operationId: submitDeployment
+      summary: Submit a new deployment request
+      description: |
+        Submit a deployment request to deploy a service artifact to a target environment.
+        
+        The API validates the request and returns immediately with a deployment ID.
+        The orchestrator then processes the deployment asynchronously through stages.
+        
+        **Idempotency:** If `idempotency_key` is provided, the API returns the existing deployment
+        if one with the same key was submitted within the last 24 hours.
+      
+      tags:
+        - Deployments
+      
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentRequest'
+            examples:
+              containerImage:
+                summary: Container image deployment
+                value:
+                  service_id: "payments-api"
+                  target_env: "prod"
+                  artifact_url: "ecr://123456789012.dkr.ecr.us-east-1.amazonaws.com/payments-api:v2.4.1-a3f1c2b"
+                  health_check_url: "https://payments-prod.nasco.com/health"
+              warFile:
+                summary: WAR file deployment
+                value:
+                  service_id: "auth-service"
+                  target_env: "stage"
+                  artifact_url: "s3://nasco-artifacts/auth-service/v1.2.0/auth-service.war"
+                  health_check_url: "https://auth-stage.nasco.com/health"
+      
+      responses:
+        '201':
+          description: Deployment request accepted and queued for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentResponse'
+        
+        '400':
+          description: Invalid request (missing required fields, invalid format)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "INVALID_REQUEST"
+                message: "Missing required field: health_check_url"
+                request_id: "req-550e8400-e29b-41d4-a716-446655440000"
+                timestamp: "2026-05-21T15:30:00Z"
+        
+        '401':
+          description: Unauthorized (invalid or missing Bearer token)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "UNAUTHORIZED"
+                message: "Invalid or missing Bearer token"
+                request_id: "req-550e8400-e29b-41d4-a716-446655440000"
+                timestamp: "2026-05-21T15:30:00Z"
+        
+        '403':
+          description: Forbidden (insufficient permissions for target environment)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "FORBIDDEN"
+                message: "User does not have permission to deploy to prod"
+                request_id: "req-550e8400-e29b-41d4-a716-446655440000"
+                timestamp: "2026-05-21T15:30:00Z"
+        
+        '429':
+          description: Too many requests (rate limit exceeded: 100 req/min per service)
+          headers:
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+              description: Rate limit ceiling
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+              description: Requests remaining in current window
+            X-RateLimit-Reset:
+              schema:
+                type: integer
+              description: Unix timestamp of rate limit window reset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "RATE_LIMIT_EXCEEDED"
+                message: "Rate limit exceeded: 100 requests/minute"
+                request_id: "req-550e8400-e29b-41d4-a716-446655440000"
+                timestamp: "2026-05-21T15:30:00Z"
+        
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "INTERNAL_SERVER_ERROR"
+                message: "Unexpected error occurred; contact platform-eng@nasco.com"
+                request_id: "req-550e8400-e29b-41d4-a716-446655440000"
+                timestamp: "2026-05-21T15:30:00Z"
+
+  # ============================================================================
+  # Deployment Status & Polling
+  # ============================================================================
+  
+  /deployments/{deployment_id}:
+    get:
+      operationId: getDeployment
+      summary: Get deployment status
+      description: |
+        Retrieve current status of a deployment by ID.
+        
+        Poll this endpoint every 5–10 seconds to monitor deployment progress.
+        Response includes current stage, progress percentage, and error messages if failed.
+      
+      tags:
+        - Deployments
+      
+      parameters:
+        - name: deployment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Deployment ID returned from POST /deployments
+          example: "d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+      
+      responses:
+        '200':
+          description: Deployment status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentResponse'
+        
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        
+        '404':
+          description: Deployment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "DEPLOYMENT_NOT_FOUND"
+                message: "Deployment d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b not found"
+                request_id: "req-550e8400-e29b-41d4-a716-446655440000"
+                timestamp: "2026-05-21T15:30:00Z"
+        
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Deployment Stages (detailed breakdown)
+  # ============================================================================
+  
+  /deployments/{deployment_id}/stages:
+    get:
+      operationId: getDeploymentStages
+      summary: Get deployment stages with detailed status
+      description: |
+        Retrieve detailed breakdown of deployment stages (prepare, validate, deploy, verify, finalize).
+        Each stage includes start time, completion time, duration, and any error messages.
+      
+      tags:
+        - Deployments
+      
+      parameters:
+        - name: deployment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+      
+      responses:
+        '200':
+          description: Deployment stages retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentStagesResponse'
+        
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        
+        '404':
+          description: Deployment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Deployment Logs (future)
+  # ============================================================================
+  
+  /deployments/{deployment_id}/logs:
+    get:
+      operationId: getDeploymentLogs
+      summary: Get deployment logs (aggregated from all stages)
+      description: |
+        Retrieve aggregated logs from all deployment stages (CodeBuild, CodeDeploy, application logs).
+        Returns logs as newline-delimited JSON (JSONL) or plain text depending on `Accept` header.
+        
+        Logs are streamed; connection may remain open until deployment completes if `follow=true`.
+      
+      tags:
+        - Deployments
+      
+      parameters:
+        - name: deployment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+        
+        - name: stage
+          in: query
+          schema:
+            type: string
+            enum:
+              - prepare
+              - validate
+              - deploy
+              - verify
+              - finalize
+          description: Optional filter by stage name
+        
+        - name: follow
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: If true, stream logs until deployment completes (like `tail -f`)
+      
+      responses:
+        '200':
+          description: Deployment logs
+          content:
+            application/x-jsonl:
+              schema:
+                type: string
+              example: |
+                {"timestamp":"2026-05-21T14:31:30Z","level":"INFO","stage":"prepare","message":"Starting artifact pull"}
+                {"timestamp":"2026-05-21T14:31:45Z","level":"INFO","stage":"prepare","message":"Artifact pulled: ecr://...@sha256:a3f1c2b"}
+                {"timestamp":"2026-05-21T14:32:00Z","level":"INFO","stage":"validate","message":"Running pre-deploy validation"}
+            text/plain:
+              schema:
+                type: string
+              example: |
+                [2026-05-21T14:31:30Z] prepare: Starting artifact pull
+                [2026-05-21T14:31:45Z] prepare: Artifact pulled: ecr://...@sha256:a3f1c2b
+                [2026-05-21T14:32:00Z] validate: Running pre-deploy validation
+        
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        
+        '404':
+          description: Deployment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Rollback
+  # ============================================================================
+  
+  /deployments/{deployment_id}/rollback:
+    post:
+      operationId: rollbackDeployment
+      summary: Trigger manual rollback to previous deployment
+      description: |
+        Manually trigger rollback to the previous stable deployment.
+        This creates a new rollback operation that restores the previous artifact version.
+        
+        **Automatic Rollback:** If health checks fail post-deployment, rollback is triggered automatically;
+        this endpoint is for manual intervention when needed.
+        
+        **Idempotency:** Submitting multiple rollback requests for the same deployment is safe (idempotent).
+      
+      tags:
+        - Deployments
+      
+      parameters:
+        - name: deployment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "d4c91d08-6b8f-4e2a-9c1b-2f8e7d9c1a4b"
+      
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RollbackRequest'
+      
+      responses:
+        '202':
+          description: Rollback initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollbackResponse'
+        
+        '400':
+          description: Invalid request (e.g., trying to rollback a deployment that already succeeded)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "INVALID_ROLLBACK"
+                message: "Cannot rollback deployment in state 'complete'"
+                request_id: "req-550e8400-e29b-41d4-a716-446655440000"
+                timestamp: "2026-05-21T15:30:00Z"
+        
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        
+        '404':
+          description: Deployment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        
+        '409':
+          description: Conflict (e.g., rollback already in progress)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "ROLLBACK_IN_PROGRESS"
+                message: "A rollback operation is already in progress for this deployment"
+                request_id: "req-550e8400-e29b-41d4-a716-446655440000"
+                timestamp: "2026-05-21T15:30:00Z"
+        
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Health Check (Liveness Probe)
+  # ============================================================================
+  
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Liveness probe for health checks
+      description: |
+        Liveness probe used by ECS to determine if deploy-hub is running.
+        
+        Returns HTTP 200 if deploy-hub is healthy (database connected, AWS services reachable).
+        Returns HTTP 503 if deploy-hub is degraded or unhealthy.
+        
+        **ECS Configuration:**
+        - Interval: 30 seconds
+        - Timeout: 5 seconds
+        - Healthy Threshold: 2
+        - Unhealthy Threshold: 3
+      
+      tags:
+        - Health
+      
+      security: []  # No authentication required for health probe
+      
+      responses:
+        '200':
+          description: Deploy-hub is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+        
+        '503':
+          description: Deploy-hub is unhealthy or degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+              example:
+                status: "unhealthy"
+                checks:
+                  database: "error"
+                  codebuild: "ok"
+                  codedeploy: "ok"
+                uptime_seconds: 45000
+                timestamp: "2026-05-21T15:30:00Z"
+
+  /health/ready:
+    get:
+      operationId: readinessCheck
+      summary: Readiness probe
+      description: |
+        Readiness probe used by AWS ALB to determine if deploy-hub is ready to receive traffic.
+        
+        Returns HTTP 200 if deploy-hub has completed initialization and is ready to process requests.
+        Returns HTTP 503 if startup is still in progress or migrations are running.
+      
+      tags:
+        - Health
+      
+      security: []
+      
+      responses:
+        '200':
+          description: Deploy-hub is ready to receive traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ready"
+        
+        '503':
+          description: Deploy-hub is not yet ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "starting"
+
+# ============================================================================
+# Global Response Headers & Conventions
+# ============================================================================
+
+x-response-headers:
+  X-Request-ID:
+    description: Unique request ID for debugging and support tickets. Present in all responses.
+    schema:
+      type: string
+      format: uuid
+  
+  X-RateLimit-Limit:
+    description: Rate limit ceiling (100 requests/minute per service)
+    schema:
+      type: integer
+  
+  X-RateLimit-Remaining:
+    description: Number of requests remaining in current rate limit window
+    schema:
+      type: integer
+  
+  X-RateLimit-Reset:
+    description: Unix timestamp when rate limit window resets
+    schema:
+      type: integer
+
+# ============================================================================
+# Tags for Documentation Organization
+# ============================================================================
+
+tags:
+  - name: Deployments
+    description: Operations for submitting, monitoring, and managing deployments
+  - name: Health
+    description: Health checks for monitoring and orchestration

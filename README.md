@@ -1,53 +1,108 @@
-# Agentic PDLC — NASCO Platform Engineering
+# Deploy-Hub Frontend Dashboard
 
-A suite of VS Code Custom Agents that simulate a lean engineering team capable of executing a
-business use case end-to-end from ideation to deployed software on AWS ECS/EC2.
+A production-ready frontend dashboard for the Deploy-Hub deployment orchestration platform. Built with TypeScript, React, Next.js 14, Tailwind CSS, and shadcn/ui components.
 
-All agents enforce the hard engineering rules from the NASCO platform engineering policies.
+## Features
+
+### ✅ Core Functionality
+- **Deployment Submission Form** — Submit service artifacts with validation
+- **Deployment Status Monitoring** — Real-time polling with 5-second refresh intervals
+- **Deployment History** — List all deployments with filtering and search
+- **Deployment Timeline** — Visual breakdown of deployment stages
+- **Manual Rollback** — Trigger rollbacks with audit trail
+- **System Health** — Monitor deploy-hub service health and component status
+
+### ✅ Technical Features
+- **Type-Safe API Client** — Typed wrappers around API endpoints
+- **React Query Integration** — Efficient server state management and caching
+- **Form Validation** — Zod schema validation with react-hook-form
+- **Accessible UI** — WCAG 2.1 AA compliant components
+- **Responsive Design** — Mobile-first approach with Tailwind CSS
+- **Comprehensive Tests** — 18+ unit and integration tests with ≥70% coverage
 
 ---
 
 ## Quick Start
 
-Open this repo in VS Code with GitHub Copilot. Type `/` in the chat panel to invoke a prompt.
+### Prerequisites
+- Node.js 20+
+- npm 10+
 
-### Run the full PDLC chain
+### Installation
 
+```bash
+# Clone repository and navigate
+cd deploy-hub
+
+# Install dependencies
+npm install
+
+# Copy environment configuration
+cp .env.example .env.local
+
+# Update .env.local with your API endpoint
+NEXT_PUBLIC_API_BASE_URL=http://localhost:3000
 ```
-/new-feature
+
+### Development
+
+```bash
+# Start development server
+npm run dev
+
+# Server runs at http://localhost:3000
 ```
 
-You will be prompted for:
-- **$BUSINESS_INITIATIVE** (required) — 2-5 sentences: business goal + problem + target users
-- **$SERVICE_NAME** (required) — kebab-case, ≤ 20 characters
-- **$TARGET_STACK** (optional) — defaults to TypeScript/NestJS + Postgres + ECS on EC2
+### Testing
 
-**Example:**
-```
-Business Initiative: NASCO needs to modernize its claims submission process. Adjusters currently
-receive FNOL submissions via email with no structured validation, causing 30% rework. Target
-users are claims adjusters and customer service representatives.
+```bash
+# Run all tests
+npm test
 
-Service Name: claims-api
+# Run tests with UI
+npm run test:ui
+
+# Generate coverage report
+npm run test:coverage
 ```
 
 ---
 
-## Agent Team
-
-The Conductor is the only agent you invoke directly. It delegates to all 9 role agents.
+## Project Structure
 
 ```
-Human
-  └─ Conductor (orchestrator)
-       ├─ product-lead          (Phase 01-02: Discover + Plan)
-       ├─ solution-architect    (Phase 03: Design)
-       ├─ tech-lead             (Phase 04: Task decomposition + code review)
-       ├─ backend-engineer  ┐   (Phase 04: Build — parallel)
-       ├─ frontend-engineer ┘
-       ├─ qa-engineer       ┐   (Phase 05: Test + Security — parallel)
-       ├─ security-engineer ┘
-       ├─ devops-engineer       (Phase 06: Ship)
+app/                    # Next.js App Router
+├── (dashboard)/        # Dashboard layout and routes
+│   ├── page.tsx                      # Dashboard home
+│   ├── deployments/
+│   │   ├── page.tsx                  # Deployment list
+│   │   ├── new/
+│   │   │   └── page.tsx              # Deployment submission
+│   │   └── [id]/
+│   │       └── page.tsx              # Deployment detail + polling
+│   ├── health/
+│   │   └── page.tsx                  # System health
+│   └── layout.tsx                    # Dashboard layout with navigation
+
+components/             # React components
+├── ui/                 # Base UI components
+│   ├── Button.tsx
+│   ├── Input.tsx
+│   ├── Select.tsx
+│   ├── Badge.tsx
+│   └── Alert.tsx
+├── DeploymentStatusBadge.tsx          # Status display
+├── DeploymentTimeline.tsx             # Stage timeline visualization
+├── LogViewer.tsx                      # Log viewer with scroll-to-bottom
+├── DeploymentForm.tsx                 # Deployment submission form
+└── ConfirmRollbackModal.tsx           # Rollback confirmation dialog
+
+lib/                    # Utilities and API client
+├── types.ts            # TypeScript type definitions
+├── api-client.ts       # Typed API client with axios
+├── hooks.ts            # React Query hooks
+├── utils.ts            # Formatting and utility functions
+```
        └─ sre-on-call           (Phase 07-08: Run + Evolve)
 ```
 
