@@ -10,6 +10,9 @@ on:
       - 'package.json'
       - 'tsconfig.json'
       - 'next.config.js'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       - '.github/workflows/frontend.yml'
   pull_request:
     branches: [main]

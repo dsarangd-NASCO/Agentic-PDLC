@@ -4,6 +4,8 @@ import React, { useMemo } from 'react';
 import { DeploymentStage } from '@/lib/types';
 import { formatDuration, getStageIcon } from '@/lib/utils';
 
+const STAGE_ORDER = ['prepare', 'validate', 'deploy', 'verify', 'finalize'];
+
 interface DeploymentTimelineProps {
   stages: DeploymentStage[];
   currentStage?: string | null;
@@ -13,11 +15,12 @@ export const DeploymentTimeline: React.FC<DeploymentTimelineProps> = ({
   stages,
   currentStage,
 }) => {
-  const stageOrder = ['prepare', 'validate', 'deploy', 'verify', 'finalize'];
-
   // Sort stages by the predefined order
   const sortedStages = useMemo(
-    () => [...stages].sort((a, b) => stageOrder.indexOf(a.stage_name) - stageOrder.indexOf(b.stage_name)),
+    () =>
+      [...stages].sort(
+        (a, b) => STAGE_ORDER.indexOf(a.stage_name) - STAGE_ORDER.indexOf(b.stage_name)
+      ),
     [stages]
   );
 
